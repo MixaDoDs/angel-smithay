@@ -25,6 +25,12 @@ impl SelectionSource {
     pub fn mime_types(&self) -> Vec<String> {
         self.provider.mime_types()
     }
+
+    /// Whether the client still has the source, i.e. can still send its data.
+    pub fn alive(&self) -> bool {
+        let provider = &self.provider;
+        selection_dispatch!(provider; SelectionSourceProvider(source) => source.is_alive())
+    }
 }
 
 /// Provider of the selection data.
