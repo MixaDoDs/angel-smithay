@@ -649,6 +649,36 @@ impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
 }
 
 impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
+    /// angel-smithay: the primary plane's new framebuffer (and what to wait for before showing
+    /// it) when nothing else changed since `previous`: all an async page flip may change.
+    fn async_flip(
+        &self,
+        previous: &Self,
+        primary: plane::Handle,
+    ) -> Option<(framebuffer::Handle, Option<SyncPoint>)> {
+        let mut flip = None;
+        for (handle, state) in &self.planes {
+            if *handle != primary {
+                if !state.skip {
+                    return None;
+                }
+                continue;
+            }
+            let config = state.config.as_ref().filter(|_| !state.skip)?;
+            let before = previous.plane_state(primary)?.config.as_ref()?;
+            if !config.is_compatible(before) {
+                return None;
+            }
+            flip = Some((
+                *config.buffer.as_ref(),
+                config.sync.as_ref().map(|(sync, _)| sync.clone()),
+            ));
+        }
+        flip
+    }
+}
+
+impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
     #[profiling::function]
     #[inline]
     fn set_state(&mut self, plane: plane::Handle, state: PlaneState<B, F>) {
@@ -1063,6 +1093,9 @@ where
     supports_fencing: bool,
     reset_pending: bool,
     signaled_fence: Option<Arc<OwnedFd>>,
+    // angel-smithay: flip async ("tearing") when only the primary plane's buffer changes
+    allow_tearing: bool,
+    async_flip_failed: bool,
 
     framebuffer_exporter: F,
 
@@ -1248,6 +1281,8 @@ where
                         primary_plane_damage_bag: DamageBag::new(4),
                         primary_is_opaque: is_opaque,
                         reset_pending: true,
+                        allow_tearing: false,
+                        async_flip_failed: false,
                         signaled_fence,
                         current_frame,
                         pending_frame: None,
@@ -1430,6 +1465,8 @@ where
             primary_plane_damage_bag: DamageBag::new(4),
             primary_is_opaque: is_opaque,
             reset_pending: true,
+            allow_tearing: false,
+            async_flip_failed: false,
             signaled_fence,
             current_frame,
             pending_frame: None,
@@ -2545,10 +2582,38 @@ where
         } = self.queued_frame.take().unwrap();
 
         let allow_partial_update = prepared_frame.kind == PreparedFrameKind::Partial;
+        let async_flip = (self.allow_tearing
+            && !self.async_flip_failed
+            && !self.surface.is_legacy()
+            && !self.surface.commit_pending())
+        .then(|| {
+            prepared_frame
+                .frame
+                .async_flip(&self.current_frame, self.surface.plane())
+        })
+        .flatten();
         let flip = if self.surface.commit_pending() {
             prepared_frame
                 .frame
                 .commit(&self.surface, self.supports_fencing, allow_partial_update, true)
+        } else if let Some((fb, sync)) = async_flip {
+            // the async request carries no IN_FENCE_FD: wait for the buffer here
+            if let Some(Err(err)) = sync.map(|sync| sync.wait()) {
+                warn!("error waiting for an async flip's buffer: {err:?}");
+            }
+            match self.surface.page_flip_async(self.surface.plane(), fb, true) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    warn!("async page flip refused, tearing off until asked again: {err}");
+                    self.async_flip_failed = true;
+                    prepared_frame.frame.page_flip(
+                        &self.surface,
+                        self.supports_fencing,
+                        allow_partial_update,
+                        true,
+                    )
+                }
+            }
         } else {
             prepared_frame
                 .frame
@@ -2729,6 +2794,17 @@ where
     /// See [`DrmSurface::vrr_supported`] for more details.
     pub fn vrr_supported(&self, conn: connector::Handle) -> FrameResult<VrrSupport, A, F> {
         self.surface.vrr_supported(conn).map_err(FrameError::DrmError)
+    }
+
+    /// angel-smithay: allow async ("tearing") page flips: a frame that changes only the primary
+    /// plane's buffer is shown at once instead of at the next vblank. Atomic surfaces only; a
+    /// flip the kernel refuses falls back to a normal one, and async flips stay off until this
+    /// is set again.
+    pub fn set_allow_tearing(&mut self, allow: bool) {
+        if allow != self.allow_tearing {
+            self.async_flip_failed = false;
+        }
+        self.allow_tearing = allow;
     }
 
     /// Returns if Variable Refresh Rate is currently enabled for frames composed by this [`DrmCompositor`].

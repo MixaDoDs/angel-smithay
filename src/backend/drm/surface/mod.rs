@@ -449,6 +449,22 @@ impl DrmSurface {
         }
     }
 
+    /// angel-smithay: an async ("tearing") page flip of `plane` to `fb`, nothing else changing.
+    ///
+    /// Atomic surfaces only: a legacy one returns [`Error::UnsupportedPlaneConfiguration`].
+    #[profiling::function]
+    pub fn page_flip_async(
+        &self,
+        plane: plane::Handle,
+        fb: framebuffer::Handle,
+        event: bool,
+    ) -> Result<(), Error> {
+        match &*self.internal {
+            DrmSurfaceInternal::Atomic(surf) => surf.page_flip_async(plane, fb, event),
+            DrmSurfaceInternal::Legacy(_) => Err(Error::UnsupportedPlaneConfiguration(plane)),
+        }
+    }
+
     /// Returns a set of available planes for this surface
     pub fn planes(&self) -> &Planes {
         &self.planes

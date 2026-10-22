@@ -924,6 +924,40 @@ impl AtomicDrmSurface {
         res
     }
 
+    /// angel-smithay: an async ("tearing") page flip that changes only `plane`'s framebuffer,
+    /// the only change the kernel takes with `DRM_MODE_PAGE_FLIP_ASYNC`.
+    pub fn page_flip_async(
+        &self,
+        plane: plane::Handle,
+        fb: framebuffer::Handle,
+        event: bool,
+    ) -> Result<(), Error> {
+        if !self.active.load(Ordering::SeqCst) {
+            return Err(Error::DeviceInactive);
+        }
+
+        let prop_mapping = self.prop_mapping.read().unwrap();
+        let mut req = AtomicModeReq::new();
+        req.add_property(
+            plane,
+            prop_mapping.plane_prop_handle(plane, "FB_ID")?,
+            property::Value::Framebuffer(Some(fb)),
+        );
+
+        let mut flags = AtomicCommitFlags::PAGE_FLIP_ASYNC | AtomicCommitFlags::NONBLOCK;
+        if event {
+            flags |= AtomicCommitFlags::PAGE_FLIP_EVENT;
+        }
+        trace!(?plane, ?fb, "Queueing async page flip");
+        self.fd.atomic_commit(flags, req).map_err(|source| {
+            Error::Access(AccessError {
+                errmsg: "Async page flip commit failed",
+                dev: self.fd.dev_path(),
+                source,
+            })
+        })
+    }
+
     // this helper function disconnects the plane.
     // this is mostly used to remove the contents quickly, e.g. on tty switch,
     // as other compositors might not make use of other planes,
