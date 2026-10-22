@@ -3094,10 +3094,16 @@ impl GlesFrame<'_, '_> {
             gl.DisableVertexAttribArray(program.attrib_vert_position as u32);
             drop(scope);
 
-            if self.renderer.capabilities.contains(&Capability::Fencing) {
-                sync_lock.update_read(gl);
-            } else if self.renderer.egl.is_shared() {
-                gl.Finish();
+            // angel-niri: a read fence only matters to another context sharing the texture; an
+            // unshared one orders its own commands. A fence per texture per frame (WaitSync on
+            // the last, DeleteSync, FenceSync) leaks inside NVIDIA's driver on GBM — the
+            // compositor grew by gigabytes over days.
+            if self.renderer.egl.is_shared() {
+                if self.renderer.capabilities.contains(&Capability::Fencing) {
+                    sync_lock.update_read(gl);
+                } else {
+                    gl.Finish();
+                }
             };
         }
 
