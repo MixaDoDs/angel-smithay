@@ -156,6 +156,11 @@ is used for timestamps for synthesized events.
 
 ### Additions
 
+- `XWayland::spawn_with_inherited_env` starts `Xwayland` with the compositor's
+  whole environment, instead of only `PATH` and
+  `XDG_RUNTIME_DIR`. This lets `Xwayland` find GPU drivers installed outside
+  the default paths, for example through `LD_LIBRARY_PATH`.
+
 - Add `WmWindowProperty::Other` to forward unrecognized X11 property changes to the compositor.
 
 
@@ -286,6 +291,17 @@ additionally drops the buffers cached for copying between a render and a target 
 `Renderer` owns.
 
 ### Bugfixes
+
+`LibinputInputBackend` now processes events libinput has queued without making its file descriptor
+readable: the `DeviceAdded` events for devices already present after `Libinput::udev_assign_seat` and
+`Libinput::resume`, and `DeviceRemoved` after `Libinput::suspend`. Previously these waited for the next
+unrelated input event, so a compositor learned about its input devices only at the first key press or
+pointer motion, and applied per-device setup such as keyboard LEDs or libinput configuration only then.
+
+`ForeignToplevelListState::remove_toplevel` no longer removes a different toplevel from the list when
+a handle in front of it was dropped without being removed (the lazy cleanup that the documentation
+allows). Previously the removed entry was picked by its position among the live handles, so a live
+toplevel could be dropped from the list and was then not announced to clients binding the global later.
 
 `input_method_v2`: a second input method binding a seat that already has one is now the object told
 it is `unavailable`, per the protocol, leaving the existing instance in place. Previously the event
